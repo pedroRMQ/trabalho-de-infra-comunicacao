@@ -1,12 +1,20 @@
-from base import IState
-from protocol import Client,Segment,IpPseudoHeader, client
-from state_machine import StateMachine
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from .base import IState
+from protocol.ip_header import IpPseudoHeader
+from protocol.segment import Segment
+
 import time
+
+if TYPE_CHECKING:
+    from protocol.client import Client
+    from state_machine import StateMachine
 
 class HandshakeState(IState):
     _client: Client
     _state_machine: StateMachine
-    _max_retries: int
+    _max_retries: int = 5
 
     def __init__(self,client:Client) -> None:
         self._client = client

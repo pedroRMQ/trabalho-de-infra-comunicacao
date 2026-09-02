@@ -1,5 +1,6 @@
 import struct
-from ip_header import IpPseudoHeader
+
+from .ip_header import IpPseudoHeader
 
 class Segment:
     source: int # porta do remetente

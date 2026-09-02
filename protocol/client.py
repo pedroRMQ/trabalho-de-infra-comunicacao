@@ -1,16 +1,20 @@
-from os import truncate
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
-from ip_header import IpPseudoHeader
-from protocol import ip_header
-from segment import Segment
+from .ip_header import IpPseudoHeader
+from .segment import Segment
+
 from state_machine import StateMachine
-from states import IState,EmptyState,HandshakeState,EstablishedState
-from server import Server
+from states.handshake import HandshakeState
+from states.established import EstablishedState
 
 import socket as sock
 import struct
 import queue
 import random
+
+if TYPE_CHECKING:
+    from server import Server
 
 class Client:
     server: Server

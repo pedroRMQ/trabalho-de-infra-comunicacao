@@ -1,8 +1,12 @@
-from base import IState,EmptyState
-from protocol import Client
-from protocol import segment
-from protocol.segment import Segment
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 from state_machine import StateMachine
+from .base import IState,EmptyState
+
+if TYPE_CHECKING:
+    from protocol import Client, Segment
+
 
 class EstablishedState(IState):
     _state_machine: StateMachine

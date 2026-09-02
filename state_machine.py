@@ -1,4 +1,8 @@
-from states import IState,EmptyState
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from states import IState,EmptyState
 
 class StateMachine:
     _stateDict: dict[str,IState]
