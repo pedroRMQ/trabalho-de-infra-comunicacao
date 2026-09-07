@@ -1,0 +1,5 @@
+RTO_SECONDS: float = 1.0
+MAX_RETRIES: int = 5
+MAX_SYN_RETRIES: int = 3
+
+

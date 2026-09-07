@@ -1,28 +1,26 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from tcp.address import Address
-from tcp.socket import MAX_SYN_RETRIES, RTO_SECONDS, TCPSocket
+from .address import Address
 
 from .segment import Segment
 from threading import Lock, Thread
 from time import sleep,time
 from errno import EBADF, ENETDOWN
+from .constant import MAX_RETRIES, RTO_SECONDS
 
 if TYPE_CHECKING:
     from .socket import TCPSocket
-
-MAX_RETRIES = 5
 
 class TrackedSegment:
     segment: Segment
     last_sent: float
     retries: int
 
-    def __init__(self,segment: Segment,last_sent:float) -> None:
+    def __init__(self,segment: Segment,last_sent:float | None = None,retries: int = 0) -> None:
         self.segment = segment
-        self.last_sent = last_sent
-        self.retries = 0
+        self.last_sent = last_sent if last_sent is not None else time()
+        self.retries = retries
 
 class RetransmitTracker:
     _unacked: dict[int, tuple[TrackedSegment, bytes]]
@@ -32,9 +30,9 @@ class RetransmitTracker:
         self._unacked = {}
         self._lock = Lock()
 
-    def track(self,seq: int, segment: Segment, chunk: bytes) -> None:
+    def track(self, segment: Segment,chunk: bytes = b'') -> None:
         with self._lock:
-            self._unacked[seq] = (TrackedSegment(segment,time()), chunk)
+            self._unacked[segment.seq] = (TrackedSegment(segment), chunk)
 
     def get(self,seq: int) -> tuple[Segment, bytes] | None:
         with self._lock:

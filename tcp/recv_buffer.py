@@ -1,8 +1,13 @@
 from __future__ import annotations
 from os import sched_getparam
+from threading import Thread
 from typing import TYPE_CHECKING
 
 from queue import Queue
+
+if TYPE_CHECKING:
+    from .socket import TCPSocket
+    from .address import Address
 
 if TYPE_CHECKING:
     from .segment import Segment
@@ -48,4 +53,15 @@ class ReceiveBuffer:
         data = self._bytes_buffer[:size]
         self._bytes_buffer = self._bytes_buffer[size:]
         return data
+
+class ReceiveWorker:
+
+    @classmethod
+    def start(cls,connections: dict[Address, TCPSocket]) -> None:
+        Thread(target=cls._work,args=(connections,),daemon=True).start()
+
+    @classmethod
+    def _work(cls,connections: dict[Address, TCPSocket]) -> None:
+        pass
+
 

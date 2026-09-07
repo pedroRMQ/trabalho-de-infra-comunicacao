@@ -2,16 +2,26 @@ from ast import Add
 from socket import socket
 from threading import Lock, Thread
 
+from tcp import pending
+
 from .segment import Segment
 
 from .address import Address
-from .pending import PendingConnection
 from time import sleep,time
 from .segment import Segment
 from errno import EBADF, ENETDOWN, ECONNREFUSED, EHOSTUNREACH
+from .constant import RTO_SECONDS, MAX_SYN_RETRIES
+from tcp import segment
 
-RTO_SECONDS = 1.0
-MAX_RETRIES = 3
+class PendingConnection:
+    segment: Segment
+    last_sent: float
+    retries: int 
+
+    def __init__(self,segment: Segment, last_sent: float = time(), retries:int = 0):
+        self.segment = segment
+        self.last_sent = last_sent
+        self.retries = retries
 
 class SynManager:
     _syn_queue: dict[Address, PendingConnection]
@@ -21,13 +31,16 @@ class SynManager:
         self._syn_queue = {}
         self._lock = Lock()
 
-    def add(self,address: Address, pending: PendingConnection) -> None:
+    def add(self,address: Address, segment: Segment) -> None:
         with self._lock:
-            self._syn_queue[address] = pending
+            self._syn_queue[address] = PendingConnection(segment)
 
-    def pop(self, address: Address) -> PendingConnection | None:
+    def pop(self, address: Address) -> Segment | None:
         with self._lock:
-            return self._syn_queue.pop(address, None)
+            pending = self._syn_queue.pop(address, None)
+            if pending is not None: 
+                return pending.segment 
+            return None
 
     def contains(self, address: Address) -> bool:
         with self._lock:
@@ -38,7 +51,7 @@ class SynManager:
         with self._lock:
             for address, pending in list(self._syn_queue.items()):
                 if now - pending.last_sent >= RTO_SECONDS:
-                    if pending.retries >= MAX_RETRIES:
+                    if pending.retries >= MAX_SYN_RETRIES:
                         del self._syn_queue[address]
                     else:
                         pending.retries += 1
