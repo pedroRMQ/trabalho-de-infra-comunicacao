@@ -17,11 +17,7 @@ from .state import TCPState
 from .retransmit import RetransmitTracker, RetransmitWorker
 from .recv_buffer import ReceiveBuffer, ReceiveWorker
 from .syn_manager import SynManager, SynWorker
-from .constant import MAX_RETRIES, RTO_SECONDS
-from tcp import segment
-
-MAX_SYN_RETRIES = 3
-RTO_SECONDS = 1.0
+from .constant import MAX_RETRIES,MAX_SYN_RETRIES,RTO_SECONDS
 
 class TCPSocket:
     _socket: socket
@@ -33,7 +29,7 @@ class TCPSocket:
     _recv_buffer: ReceiveBuffer
     _syn_manager: SynManager
 
-    _established_connections: dict[Address, TCPSocket]
+    _sessions: dict[Address, TCPSocket]
 
     seq: int
     mss: int
@@ -42,7 +38,7 @@ class TCPSocket:
         self._socket = socket(AF_INET,SOCK_DGRAM)
         self._state = TCPState.CLOSED
 
-        self._established_connections = {}
+        self._sessions = {}
 
         self._tracker = RetransmitTracker()
         self._recv_buffer = ReceiveBuffer()
@@ -53,13 +49,11 @@ class TCPSocket:
     def _from_socket(self,address: Address) -> TCPSocket:
         instance = TCPSocket.__new__(TCPSocket)
         instance._socket = self._socket
-        instance._state = TCPState.ESTABLISHED
+        instance._state = TCPState.CLOSED
 
         instance._remote_address = address
         instance._tracker = RetransmitTracker()
         instance._recv_buffer = ReceiveBuffer()
-
-        instance._established_connections = self._established_connections
 
         instance.seq = randint(0, 0xFFFFFFFF)
         instance.mss = 3
@@ -91,7 +85,7 @@ class TCPSocket:
         self._accept_queue: Queue[tuple[Address, TCPSocket]] = Queue()
         self._state = TCPState.LISTEN
         ReceiveWorker.start(self)
-        RetransmitWorker.start(self._established_connections)
+        RetransmitWorker.start(self._sessions)
         SynWorker.start(self._socket,self._syn_manager)
 
     def accept(self) -> tuple[Address,TCPSocket]:
@@ -192,11 +186,11 @@ class TCPSocket:
                         self._remote_address = address
 
                         self._send_ack(self.seq,self.ack,address)
-                        self._established_connections[address] = self
+                        self._sessions[address] = self
 
                         self._state = TCPState.ESTABLISHED
                         ReceiveWorker.start(self)
-                        RetransmitWorker.start(self._established_connections)
+                        RetransmitWorker.start(self._sessions)
                         return
 
             except timeout:
@@ -221,7 +215,7 @@ class TCPSocket:
 
         elif self._state == TCPState.LISTEN:
             self._state = TCPState.CLOSED
-            for connection in list(self._established_connections.values()):
+            for connection in list(self._sessions.values()):
                 connection.close()
 
             try:
@@ -229,17 +223,17 @@ class TCPSocket:
             except OSError:
                 pass
 
-    def _send_info(self,address: Address | None = None,urg:bool = False,ack:bool = False,psh:bool = False,rst:bool = False,syn:bool = False,fin:bool = False):
+    def _send_info(self,address: Address | None = None,urg:bool = False,ack:bool = False,psh:bool = False,rst:bool = False,syn:bool = False,fin:bool = False,track:bool = True) -> Segment:
         address = address if address is not None else self._remote_address
         segment = Segment(self.local_address.port,address.port,self.seq,self.ack,urg,ack,psh,rst,syn,fin)
         pseudo = IpPseudoHeader(int(self.local_address.host),int(address.host),len(segment))
         segment.update_checksum(pseudo)
-        if syn or fin: self._tracker.track(segment)
+        if track and (syn or fin): self._tracker.track(segment)
         self._socket.sendto(segment.to_bytes(), address.to_tuple())
         self.seq = (self.seq + int(segment.syn) + int(segment.fin)) % 0x100000000
+        return segment
 
     def _close_abrupt(self):
-        self._send_info(rst=True)
+        self._send_info(rst=True,track=False)
         self._state = TCPState.CLOSED
-        self._established_connections.pop(self._remote_address, None)
-
+        self._sessions.pop(self._remote_address, None)

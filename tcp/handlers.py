@@ -1,123 +1,102 @@
 from __future__ import annotations
 from ast import Add
-from enum import CONTINUOUS
-import re
-from time import pthread_getcpuclockid
+from socket import setdefaulttimeout
 from typing import TYPE_CHECKING, Callable
 
 from tcp import segment
 from tcp.syn_manager import SynManager
-from .state import TCPState
 
 if TYPE_CHECKING:
     from .segment import Segment
     from .socket import TCPSocket
     from .address import Address
+    from .state import TCPState
 
-def handle_listen(server: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
+def handle_listen(server: TCPSocket,client: TCPSocket,segment: Segment, payload: bytes, address: Address) -> None:
     if segment.rst:
         return
 
     if segment.syn:
-        SynManager.send_syn_ack(server,address,(segment.seq + 1)% 0x100000000)
-        return
+        client = server._from_socket(address)
+        client._state = TCPState.SYN_RECEIVED
+        client.ack = (segment.seq + 1) % 0x100000000
 
-    if segment.ack and server._syn_manager.validate_ack(address, segment.ack_seq):
-            pending = server._syn_manager.pop(address)
-            if not pending:
-                return
+        syn_ack = client._send_info(syn=True,ack=True,track=False)
+        server._syn_manager.add(address,syn_ack)
+        server._sessions[address] = client
 
-            client_socket = server._from_socket(address)
-            client_socket.seq = (pending.seq + 1) % 0x100000000
-            client_socket.ack = segment.seq
-            server._established_connections[address] = client_socket
-            server._accept_queue.put((address,client_socket))
-
-def handle_established(connection: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
-    if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address,None)
-        return
-
+def handle_syn_received(server: TCPSocket,client: TCPSocket, segment:Segment, payload: bytes, address: Address) -> None:
     if segment.ack:
-        connection._tracker.acknowledge(segment.ack)
+        pending = server._syn_manager.pop(address)
+        if not pending:
+            server._sessions.pop(address, None)
+            return
 
-    pushed = connection._recv_buffer.push(segment,payload)
+        client._state = TCPState.ESTABLISHED
+        server._accept_queue.put((address, client))
 
-    if pushed and (payload or segment.fin):
-        connection._send_info(address,ack=True)
+    if segment.rst:
+        client._state = TCPState.CLOSED
+        server._sessions.pop(address)
+
+def handle_established(server: TCPSocket,client: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
+    if payload or segment.fin:
+        client._send_info(ack=True,track=False)
+        server._recv_buffer.push(segment,payload)
+        if segment.fin:
+            client._state = TCPState.CLOSE_WAIT
+
+    if segment.rst:
+        client._state = TCPState.CLOSED
+        server._sessions.pop(address)
+
+
+def handle_fin_wait_1(server:TCPSocket,client: TCPSocket, segment: Segment, payload: bytes,address: Address) -> None:
+    if segment.ack:
+        server._tracker.acknowledge(segment.ack_seq)
+        client._state = TCPState.FIN_WAIT_2
 
     if segment.fin:
-        connection._state = TCPState.CLOSE_WAIT
+        client._send_info(ack=True,track=False)
+        server._recv_buffer.push(segment,payload)
 
-def handle_fin_wait_1(connection: TCPSocket, segment: Segment, payload: bytes,address: Address):
+        client._state = TCPState.CLOSING
+        if segment.ack:
+            client._state = TCPState.TIME_WAIT
+
     if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address, None)
-        return
+        server._sessions.pop(address, None)
+        client._state = TCPState.CLOSED
 
-    if segment.ack:
-        connection._tracker.acknowledge(segment.ack_seq)
-        connection._state = TCPState.FIN_WAIT_2
 
+def handle_fin_wait_2(server:TCPSocket, client: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
     if segment.fin:
-        connection._recv_buffer.push(segment,payload)
-        connection._send_info(ack=True)
+        server._recv_buffer.push(segment, payload)
+        client._send_info(ack=True)
+        client._state = TCPState.TIME_WAIT
 
-        if connection._state == TCPState.FIN_WAIT_2:
-            connection._state = TCPState.TIME_WAIT
-        else:
-            connection._state = TCPState.CLOSING
-
-
-def handle_fin_wait_2(connection: TCPSocket, segment: Segment, payload: bytes, address: Address):
     if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address, None)
-        return
+        server._sessions.pop(address, None)
+        client._state = TCPState.CLOSED
 
-    if segment.fin:
-        connection._recv_buffer.push(segment, payload)
-        connection._send_info(ack=True)
-        connection._state = TCPState.TIME_WAIT
 
-def handle_close_wait(connection: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
-    if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address, None)
-        return
-
+def handle_last_ack(server:TCPSocket,client: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
     if segment.ack:
-        connection._tracker.acknowledge(segment.ack_seq)
+        server._tracker.acknowledge(segment.ack_seq)
+        server._sessions.pop(address,None)
+        client._state = TCPState.CLOSED
 
-def handle_last_ack(connection: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
     if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address,None)
-
+        server._sessions.pop(address,None)
+        client._state = TCPState.CLOSED
+def handle_closing(server:TCPSocket,client: TCPSocket, segment: Segment, payload:bytes, address: Address) -> None:
     if segment.ack:
-        connection._tracker.acknowledge(segment.ack_seq)
+        client._tracker.acknowledge(segment.ack_seq)
+        client._state = TCPState.TIME_WAIT
 
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address,None)
-
-def handle_time_wait(connection: TCPSocket, segment: Segment, payload:bytes, address: Address) -> None:
     if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address,None)
-        return
-
-    if segment.fin:
-        connection._send_info(ack=True)
-
-def handle_closing(connection: TCPSocket, segment: Segment, payload:bytes, address: Address) -> None:
-    if segment.rst:
-        connection._state = TCPState.CLOSED
-        connection._established_connections.pop(address,None)
-
-    if segment.ack:
-        connection._tracker.acknowledge(segment.ack_seq)
-        connection._state = TCPState.TIME_WAIT
+        client._state = TCPState.CLOSED
+        client._sessions.pop(address,None)
 
 STATE_HANDLERS: dict[TCPState, Callable | None] = {
     TCPState.CLOSED: None,
@@ -131,4 +110,25 @@ STATE_HANDLERS: dict[TCPState, Callable | None] = {
     TCPState.LAST_ACK: handle_last_ack,
     TCPState.TIME_WAIT: handle_time_wait,
 }
+
+
+
+
+def handle_close_wait(server:TCPSocket,client: TCPSocket, segment: Segment, payload: bytes, address: Address) -> None:
+    if segment.ack:
+        server._tracker.acknowledge(segment.ack_seq)
+
+    if segment.rst:
+        server._sessions.pop(address, None)
+        client._state = TCPState.CLOSED
+
+
+def handle_time_wait(server:TCPSocket,client: TCPSocket, segment: Segment, payload:bytes, address: Address) -> None:
+    if segment.fin:
+        client._send_info(ack=True)
+
+    if segment.rst:
+        server._sessions.pop(address,None)
+        client._state = TCPState.CLOSED
+
 
