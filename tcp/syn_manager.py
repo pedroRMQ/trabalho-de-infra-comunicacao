@@ -12,19 +12,10 @@ from .segment import Segment
 from errno import EBADF, ENETDOWN, ECONNREFUSED, EHOSTUNREACH
 from .constant import RTO_SECONDS, MAX_SYN_RETRIES
 from tcp import segment
-
-class PendingConnection:
-    segment: Segment
-    last_sent: float
-    retries: int 
-
-    def __init__(self,segment: Segment, last_sent: float = time(), retries:int = 0):
-        self.segment = segment
-        self.last_sent = last_sent
-        self.retries = retries
+from .tracked_segment import TrackedSegment
 
 class SynManager:
-    _syn_queue: dict[Address, PendingConnection]
+    _syn_queue: dict[Address, TrackedSegment]
     _lock: Lock
 
     def __init__(self) -> None:
@@ -33,7 +24,7 @@ class SynManager:
 
     def add(self,address: Address, segment: Segment) -> None:
         with self._lock:
-            self._syn_queue[address] = PendingConnection(segment)
+            self._syn_queue[address] = TrackedSegment(segment)
 
     def pop(self, address: Address) -> Segment | None:
         with self._lock:
@@ -46,27 +37,19 @@ class SynManager:
         with self._lock:
             return address in self._syn_queue
 
-    def process_expired(self, now: float) -> list[tuple[Segment, Address]]:
-        expired: list[tuple[Segment, Address]] = []
+    def get_expired(self,now: float | None = None) -> list[tuple[TrackedSegment, Address]]:
+        expired: list[tuple[TrackedSegment, Address]] = []
+        now = now if now is not None else time()
         with self._lock:
-            for address, pending in list(self._syn_queue.items()):
-                if now - pending.last_sent >= RTO_SECONDS:
-                    if pending.retries >= MAX_SYN_RETRIES:
-                        del self._syn_queue[address]
-                    else:
-                        pending.retries += 1
-                        pending.last_sent = now
-                        expired.append((pending.segment, address))
+            for address, tracked in list(self._syn_queue.items()):
+                if now - tracked.last_sent >= RTO_SECONDS:
+                    # if pending.retries >= MAX_SYN_RETRIES:
+                        # del self._syn_queue[address]
+                    #else:
+                        # pending.retries += 1
+                        # pending.last_sent = now
+                    expired.append((tracked, address))
         return expired
-
-    def validate_ack(self,address: Address,ack: int) -> bool:
-        with self._lock:
-            pending = self._syn_queue.get(address)
-            if not pending:
-                return False
-
-            expected_ack = (pending.segment.seq + 1) % 0x100000000
-            return ack == expected_ack
 
     @classmethod
     def send_syn_ack(cls,connection: TCPSocket,address: Address,ack: int):
@@ -80,26 +63,30 @@ class SynManager:
 
 class SynWorker:
     @classmethod
-    def start(cls,socket: socket,syn_manager: SynManager):
-        Thread(target=cls._work,args=(socket,syn_manager),daemon=True).start()
+    def start(cls,server: TCPSocket):
+        Thread(target=cls._work,args=(server,),daemon=True).start()
 
     @classmethod
-    def _work(cls,socket: socket,syn_manager: SynManager) -> None:
+    def _work(cls,server: TCPSocket) -> None:
         while True:
             sleep(0.2)
             now = time()
 
-            if socket.fileno() == -1:
-                return
-
-            expired = syn_manager.process_expired(now)
-            for segment, address in expired:
+            expired = server._syn_manager.get_expired(now)
+            for tracked, address in expired:
+                if tracked.retries >= MAX_SYN_RETRIES:
+                    server._syn_manager.pop(address)
+                    server._sessions.pop(address)
+                    continue
                 try:
-                    socket.sendto(segment.to_bytes(),address.to_tuple())
+                    server._socket.sendto(tracked.segment.to_bytes(),address.to_tuple())
+                    tracked.retries += 1
+                    tracked.last_sent = now
                 except OSError as error:
                     if error.errno in (EBADF,ENETDOWN):
                         return
                     if error.errno in (ECONNREFUSED, EHOSTUNREACH):
-                        syn_manager.pop(address)
+                        server._syn_manager.pop(address)
+                        server._sessions.pop(address)
 
 

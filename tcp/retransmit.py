@@ -8,19 +8,10 @@ from threading import Lock, Thread
 from time import sleep,time
 from errno import EBADF, ENETDOWN
 from .constant import MAX_RETRIES, RTO_SECONDS
+from .tracked_segment import TrackedSegment
 
 if TYPE_CHECKING:
     from .socket import TCPSocket
-
-class TrackedSegment:
-    segment: Segment
-    last_sent: float
-    retries: int
-
-    def __init__(self,segment: Segment,last_sent:float | None = None,retries: int = 0) -> None:
-        self.segment = segment
-        self.last_sent = last_sent if last_sent is not None else time()
-        self.retries = retries
 
 class RetransmitTracker:
     _unacked: dict[int, tuple[TrackedSegment, bytes]]
@@ -51,11 +42,11 @@ class RetransmitTracker:
             for seq in confirmed_seqs:
                 del self._unacked[seq]
 
-    def get_expired(self,now: float,rto: float) -> list[tuple[TrackedSegment, bytes]]:
+    def get_expired(self,now: float) -> list[tuple[TrackedSegment, bytes]]:
         with self._lock:
             expired: list[tuple[TrackedSegment, bytes]] = []
             for seq, (tracked, chunk) in list(self._unacked.items()):
-                if now - tracked.last_sent >= rto:
+                if now - tracked.last_sent >= RTO_SECONDS:
                     expired.append((tracked, chunk))
             return expired
 
@@ -65,27 +56,26 @@ class RetransmitTracker:
 
 class RetransmitWorker:
     @classmethod
-    def start(cls,connections: dict[Address, TCPSocket]):
-        Thread(target=cls._work,args=(connections,),daemon=True).start()
+    def start(cls,server: TCPSocket):
+        Thread(target=cls._work,args=(server,),daemon=True).start()
 
     @classmethod
-    def _work(cls,connections: dict[Address, TCPSocket]):
+    def _work(cls,server: TCPSocket):
         while True:
             sleep(0.1)
             now = time()
 
-            for connection in list (connections.values()):
-                expired_items = connection._tracker.get_expired(now,RTO_SECONDS)
+            for session in list (server._sessions.values()):
+                expired_items = session._tracker.get_expired(now)
 
                 for tracked, chunk in expired_items:
                     if tracked.retries >= MAX_RETRIES:
-                        connection.close()
+                        session._close_abrupt()
                         break
-
-                    tracked.retries += 1
-                    tracked.last_sent = now
                     try:
-                        connection.retransmit(tracked.segment.seq)
+                        session._socket.sendto(tracked.segment.to_bytes() + chunk,session._remote_address.to_tuple())
+                        tracked.retries += 1
+                        tracked.last_sent = now
                     except OSError as error:
                         if error.errno in (EBADF,ENETDOWN):
                             return

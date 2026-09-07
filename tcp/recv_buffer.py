@@ -59,7 +59,6 @@ class ReceiveBuffer:
         return data
 
 class ReceiveWorker:
-
     @classmethod
     def start(cls,server: TCPSocket) -> None:
         Thread(target=cls._work,args=(server,),daemon=True).start()
@@ -79,10 +78,9 @@ class ReceiveWorker:
             if not segment.is_checksum_valid(pseudo,payload):
                 continue
 
-            connection = server._established_connections.get(address, server)
+            sessions = server._sessions.get(address, server)
 
-            handler = STATE_HANDLERS.get(connection._state)
+            handler = STATE_HANDLERS.get(sessions._state)
 
             if handler:
-                handler(connection,segment,payload, address)
-
+                handler(sessions,segment,payload, address)

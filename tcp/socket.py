@@ -85,8 +85,8 @@ class TCPSocket:
         self._accept_queue: Queue[tuple[Address, TCPSocket]] = Queue()
         self._state = TCPState.LISTEN
         ReceiveWorker.start(self)
-        RetransmitWorker.start(self._sessions)
-        SynWorker.start(self._socket,self._syn_manager)
+        RetransmitWorker.start(self)
+        SynWorker.start(self)
 
     def accept(self) -> tuple[Address,TCPSocket]:
         if not self._state == TCPState.LISTEN:
@@ -99,24 +99,6 @@ class TCPSocket:
 
     def recv(self,buffer_size: int) -> bytes:
         return self._recv_buffer.read(buffer_size);
-
-    def retransmit(self,seq: int):
-        retransmit = self._tracker.get(seq)
-        if retransmit:
-            self._socket.sendto(retransmit[0].to_bytes() + retransmit[1],self._remote_address.to_tuple())
-
-    def _send_ack(self,seq_num: int,ack_num: int,dest_address: Address):
-        segment = Segment(
-            self.local_address.port,
-            dest_address.port,
-            seq_num,
-            ack_num,
-            ack=True
-        )
-        ip_header = IpPseudoHeader(int(self.local_address.host),int(dest_address.host),len(segment))
-        segment.update_checksum(ip_header)
-
-        self._socket.sendto(segment.to_bytes(),dest_address.to_tuple())
 
     def send(self, payload: bytes) -> int:
         if not payload: return 0
@@ -185,12 +167,12 @@ class TCPSocket:
 
                         self._remote_address = address
 
-                        self._send_ack(self.seq,self.ack,address)
+                        self._send_info(address,ack=True,track=False)
                         self._sessions[address] = self
 
                         self._state = TCPState.ESTABLISHED
                         ReceiveWorker.start(self)
-                        RetransmitWorker.start(self._sessions)
+                        RetransmitWorker.start(self)
                         return
 
             except timeout:
