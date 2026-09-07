@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ast import Add
 from typing import Dict, final, TYPE_CHECKING
 
 from struct import pack,unpack
@@ -17,6 +18,7 @@ from .retransmit import RetransmitTracker, RetransmitWorker
 from .recv_buffer import ReceiveBuffer, ReceiveWorker
 from .syn_manager import SynManager, SynWorker
 from .constant import MAX_RETRIES, RTO_SECONDS
+from tcp import segment
 
 MAX_SYN_RETRIES = 3
 RTO_SECONDS = 1.0
@@ -48,17 +50,16 @@ class TCPSocket:
         self.seq = randint(0,0xFFFFFFFF)
         self.mss = 3
 
-    @classmethod
-    def _from_socket(cls,socket: socket,remote_address: Address) -> TCPSocket:
-        instance = cls.__new__(cls)
-        instance._socket = socket
+    def _from_socket(self,address: Address) -> TCPSocket:
+        instance = TCPSocket.__new__(TCPSocket)
+        instance._socket = self._socket
         instance._state = TCPState.ESTABLISHED
 
-        instance._remote_address = remote_address
+        instance._remote_address = address
         instance._tracker = RetransmitTracker()
         instance._recv_buffer = ReceiveBuffer()
 
-        instance._established_connections = {}
+        instance._established_connections = self._established_connections
 
         instance.seq = randint(0, 0xFFFFFFFF)
         instance.mss = 3
@@ -89,24 +90,18 @@ class TCPSocket:
         self._syn_manager = SynManager()
         self._accept_queue: Queue[tuple[Address, TCPSocket]] = Queue()
         self._state = TCPState.LISTEN
-        ReceiveWorker.start(self._established_connections)
+        ReceiveWorker.start(self)
         RetransmitWorker.start(self._established_connections)
         SynWorker.start(self._socket,self._syn_manager)
-
-    def close(self):
-        if self._state == TCPState.CLOSED: return
-
-        self._state = TCPState.CLOSED
-        # implementar função de fechar conexão caso ela esteja ativa
-        try:
-            self._socket.close()
-        except OSError:
-            pass
 
     def accept(self) -> tuple[Address,TCPSocket]:
         if not self._state == TCPState.LISTEN:
             raise RuntimeError("Tentativa de aceitar cliente em socket inadequada")
-        return self._accept_queue.get()
+
+        while True:
+            address, socket = self._accept_queue.get()
+            if socket._state != TCPState.CLOSED:
+                return address, socket
 
     def recv(self,buffer_size: int) -> bytes:
         return self._recv_buffer.read(buffer_size);
@@ -200,7 +195,7 @@ class TCPSocket:
                         self._established_connections[address] = self
 
                         self._state = TCPState.ESTABLISHED
-                        ReceiveWorker.start(self._established_connections)
+                        ReceiveWorker.start(self)
                         RetransmitWorker.start(self._established_connections)
                         return
 
@@ -211,4 +206,40 @@ class TCPSocket:
                 self._socket.settimeout(None)
 
         raise TimeoutError(f'Falha ao conectar em {address}')
+
+    def close(self):
+        if self._state == TCPState.CLOSED: return
+
+        if self._state == TCPState.ESTABLISHED:
+            self._state = TCPState.FIN_WAIT_1
+            self._send_info(fin=True)
+            return
+
+        if self._state == TCPState.CLOSE_WAIT:
+            self._state = TCPState.LAST_ACK
+            self._send_info(fin=True)
+
+        elif self._state == TCPState.LISTEN:
+            self._state = TCPState.CLOSED
+            for connection in list(self._established_connections.values()):
+                connection.close()
+
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+
+    def _send_info(self,address: Address | None = None,urg:bool = False,ack:bool = False,psh:bool = False,rst:bool = False,syn:bool = False,fin:bool = False):
+        address = address if address is not None else self._remote_address
+        segment = Segment(self.local_address.port,address.port,self.seq,self.ack,urg,ack,psh,rst,syn,fin)
+        pseudo = IpPseudoHeader(int(self.local_address.host),int(address.host),len(segment))
+        segment.update_checksum(pseudo)
+        if syn or fin: self._tracker.track(segment)
+        self._socket.sendto(segment.to_bytes(), address.to_tuple())
+        self.seq = (self.seq + int(segment.syn) + int(segment.fin)) % 0x100000000
+
+    def _close_abrupt(self):
+        self._send_info(rst=True)
+        self._state = TCPState.CLOSED
+        self._established_connections.pop(self._remote_address, None)
 

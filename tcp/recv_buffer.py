@@ -5,12 +5,16 @@ from typing import TYPE_CHECKING
 
 from queue import Queue
 
-if TYPE_CHECKING:
-    from .socket import TCPSocket
-    from .address import Address
+from tcp import address, segment
+from tcp.ip import IpPseudoHeader
+from tcp.state import TCPState
+
+from .handlers import STATE_HANDLERS
 
 if TYPE_CHECKING:
     from .segment import Segment
+    from .address import Address
+    from .socket import TCPSocket
 
 class ReceiveBuffer:
     ack: int
@@ -57,11 +61,28 @@ class ReceiveBuffer:
 class ReceiveWorker:
 
     @classmethod
-    def start(cls,connections: dict[Address, TCPSocket]) -> None:
-        Thread(target=cls._work,args=(connections,),daemon=True).start()
+    def start(cls,server: TCPSocket) -> None:
+        Thread(target=cls._work,args=(server,),daemon=True).start()
 
     @classmethod
-    def _work(cls,connections: dict[Address, TCPSocket]) -> None:
-        pass
+    def _work(cls,server: TCPSocket) -> None:
+        while server._state != TCPState.CLOSED:
+            try:
+                data, raw_address = server._socket.recvfrom(65535)
+            except OSError:
+                return
 
+            segment, payload = Segment.from_bytes(data)
+            address = Address.from_tuple(raw_address)
+
+            pseudo = IpPseudoHeader(int(address.host),int(server.local_address.host),len(segment) + len(payload))
+            if not segment.is_checksum_valid(pseudo,payload):
+                continue
+
+            connection = server._established_connections.get(address, server)
+
+            handler = STATE_HANDLERS.get(connection._state)
+
+            if handler:
+                handler(connection,segment,payload, address)
 

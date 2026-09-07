@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING, Callable
+
 from enum import Enum, auto
 
 class TCPState(Enum):
@@ -12,6 +15,3 @@ class TCPState(Enum):
     LAST_ACK = auto()
     TIME_WAIT = auto()
     CLOSING = auto()
-
-    def __init__(self) -> None:
-        pass

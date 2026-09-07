@@ -1,11 +1,11 @@
-from ast import Add
+from random import randint
 from socket import socket
 from threading import Lock, Thread
 
-from tcp import pending
+from tcp.ip import IpPseudoHeader
+from tcp.socket import TCPSocket
 
 from .segment import Segment
-
 from .address import Address
 from time import sleep,time
 from .segment import Segment
@@ -58,6 +58,25 @@ class SynManager:
                         pending.last_sent = now
                         expired.append((pending.segment, address))
         return expired
+
+    def validate_ack(self,address: Address,ack: int) -> bool:
+        with self._lock:
+            pending = self._syn_queue.get(address)
+            if not pending:
+                return False
+
+            expected_ack = (pending.segment.seq + 1) % 0x100000000
+            return ack == expected_ack
+
+    @classmethod
+    def send_syn_ack(cls,connection: TCPSocket,address: Address,ack: int):
+        seq = randint(0,0xFFFFFFFF)
+        segment = Segment(connection.local_address.port,address.port,seq,ack,syn=True,ack=True)
+        pseudo = IpPseudoHeader(int(connection.local_address.host),int(address.host),len(segment))
+        segment.update_checksum(pseudo)
+
+        connection._socket.sendto(segment.to_bytes(),address.to_tuple())
+        connection._syn_manager.add(address,segment)
 
 class SynWorker:
     @classmethod
