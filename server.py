@@ -1,75 +1,53 @@
-import socket as sock
-import threading
-import sys
-import struct
-from protocol import Client
+import socket
 
-class Server:
-    socket: sock.socket
-    port: int
-    clients: dict[tuple[str,int], Client]
+HOST = '127.0.0.1'
+PORT = 8080
 
-    def __init__(self, port: int = 8080) -> None:
-        self.port = port
+# envio individual vs envio em lote (IND X GRP) 
+# Go-Back-N vs Repetição Seletiva (GBN X SR)
 
-        self.socket = sock.socket(sock.AF_INET,sock.SOCK_DGRAM)    # NOTE: Mudei de TCP para UDP para receber pacotes completos
-        self.socket.setsockopt(sock.SOL_SOCKET,sock.SO_REUSEADDR, 1)
+# tamanho maximo do texto inicial
+# tamanho da janela
+TEXT_MAX_DEFAULT = 30
+TAM_JANELA_DEFAULT = 5
 
-        try:
-            self.socket.bind(('',self.port))
-            print(f"Servidor esta escutando na porta {self.port}")
-        except OSError as error:
-            raise RuntimeError(f"Falha ao vincular a porta {self.port}") from error
+def recv(connection: socket.socket) -> bytes:
+    buffer = b''
+    while True:
+        byte = connection.recv(1)
+        if not byte or byte == b'\n':
+            break
+        buffer += byte
+    return buffer
 
-        self.clients = {}
+def recvConfiguration(connection: socket.socket) -> tuple[str,int,int]:
+    data = recv(connection)
+    data = data if not data else data.strip().decode()
 
-    def __del__(self):
-        if self.socket:
-            self.socket.close()
+    if not data or not data.startswith("CFG:"): return 'GBN', TEXT_MAX_DEFAULT, TAM_JANELA_DEFAULT
 
+    pieces = data[4:].split(',')
+    protocol = pieces[0]
+    text_max = int(pieces[1])
+    window = int(pieces[2])
 
-    def listen(self) -> None:
-        while(True):
-            data, address = self.socket.recvfrom(65535)
+    return protocol, text_max, window
 
-            if address not in self.clients:
-                client = Client(self, address)
-                self.clients[address] = client
-
-                thread = threading.Thread(target=client.run,daemon=True)
-                thread.start()
-
-            self.clients[address].receive_bytes(data)
-
-    def get_ip(self) -> int:
-        ip_str = self.socket.getsockname()[0]
-        return struct.unpack('!I',sock.inet_aton(ip_str))[0]
-
-    def get_port(self) -> int:
-        return self.socket.getsockname()[1]
-
-
-def main(args: list[str]) -> None:
-    port = None
-    if len(args) > 1:
-        try:
-            port = int(args[1])
-        except ValueError:
-            print("ERRO FATAL: A porta deve ser um numero inteiro")
-            sys.exit(1)
-
-    try:
-        server = Server(port) if port else Server()
-        server.listen()
-    except RuntimeError as error:
-        print(f"ERRO FATAL: {error}")
-        sys.exit(1)
-
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST,PORT))
+    server.listen()
+    print(f'Servidor escutando na porta: {HOST}:{PORT}')
+    while True:
+        connection, address = server.accept()
+        protocol, text_max, window = recvConfiguration(connection)
+        print(f'Cliente Configurado para \n\tModo de operaçaõ:{protocol}\n\tTamanho maximo do texto inicial:{text_max}\n\tjanela inicial:{window}')
+        connection.send((f'CFG:{protocol},{text_max},{window}\n').encode())
+        connection.close()
 
 if __name__ == '__main__':
     try:
-        main(sys.argv)
+        main()
     except KeyboardInterrupt:
-        print("\nEncerrando programa")
-        sys.exit(1)
-
+        print('Fechando servidor...')
