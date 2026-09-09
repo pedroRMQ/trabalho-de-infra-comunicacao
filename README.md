@@ -59,3 +59,13 @@ Para parar o servidor, use `Ctrl+C`.
   CFG:<protocolo>,<tamanho_texto>,<tamanho_janela>
   ```
 - Caso a mensagem recebida esteja vazia ou não comece com `CFG:`, os valores padrão (`GBN`, `30`, `5`) são assumidos.
+
+## Relatório de IA
+
+Foi utilizada Inteligência Artificial de forma auxiliar durante o desenvolvimento, especificamente para:
+
+- Pesquisa sobre o modo de operação: envio individual (IND) vs. envio em lote (GRP)
+- Pesquisa sobre a diferença entre Go-Back-N e Repetição Seletiva
+- Entendimento do conceito de tamanho da janela
+
+https://chatgpt.com/share/6aa15a38-5e04-83e9-8cd3-4fdac4202436
