@@ -1,57 +1,115 @@
-import socket
+from __future__ import annotations
+from enum import Enum
+import socket as sock
+from dataclasses import dataclass
+from random import randint
+
+## TODO: Poder escolher o envio em lote ou individual  
+## TODO: Cliente escolher entre go back end e sr/
+## TODO: Ajeitar o tamanho da janela entre 1 e 5
 
 HOST = '127.0.0.1'
 PORT = 8080
 
-def recv(connection: socket.socket) -> bytes:
+def recv(socket: sock.socket) -> bytes:
     buffer = b''
     while True:
-        data = connection.recv(1)
+        data = socket.recv(1)
         if not data or data == b'\n':
             break
         buffer += data
     return buffer
 
-def recvConfiguration(connection: socket.socket) -> tuple[str,int,int]:
-    data = recv(connection)
-    data = data if not data else data.strip().decode()
-    if not data or not data.startswith('CFG:'):
-        return 'GBN', 30, 5 
+class shipping_t(Enum):
+	INDIVIDUAL = 0
+	BATCH = 1
 
-    pieces = data[4:].split(',')
-    protocol = pieces[0]
-    text_max = int(pieces[1])
-    window = int(pieces[2])
+	def __str__(self) -> str:
+		return self.name
 
-    return protocol, text_max, window
+class algorithm_t(Enum):
+	GBN = 0
+	SR = 1
+
+	def __str__(self) -> str:
+		return self.name
+
+@dataclass
+class config_t:
+	shipping: shipping_t
+	algorithm: algorithm_t
+	text_max_len: int
+	text_min_len: int
+	window_size: int
+
+	def __init__(self,shipping: shipping_t = shipping_t.BATCH, algorithm: algorithm_t = algorithm_t.GBN, text_max_len:int = 30, text_min_len:int = 30,window_size:int = randint(0,5)) -> None:
+		self.shipping = shipping
+		self.algorithm = algorithm
+		self.text_max_len = text_max_len
+		self.text_min_len = text_min_len
+		self.window_size = window_size
+
+	def __str__(self) -> str:
+		return f'CFG:{self.shipping.value},{self.algorithm.value},{self.text_max_len},{self.text_min_len},{self.window_size}\n'
+
+	@classmethod
+	def from_bytes(cls,conf: bytes):
+		data = conf if not conf else conf.strip().decode()
+		if not data or not data.startswith('CFG:'):
+			return config_t()
+
+		pieces = data[4:].split(',')
+		return config_t(shipping_t(int(pieces[0])),algorithm_t(int(pieces[1])),int(pieces[2]),int(pieces[3]),int(pieces[4]))
+
+	@classmethod
+	def recv(cls,socket: sock.socket) -> config_t:
+		conf = recv(socket)
+		return cls.from_bytes(conf)
+
+	def to_bytes(self) -> bytes:
+		return str(self).encode()
+
+	def diff(self,other: object) -> list[str]:
+		if not isinstance(other,config_t):
+			raise TypeError("Só é possivel diferenciar dois config_t")
+
+		diffs = []
+		if self.shipping != other.shipping:
+			diffs.append('shipping')
+
+		if self.algorithm != other.algorithm:
+			diffs.append('algorithm')
+
+		if self.text_max_len != other.text_max_len:
+			diffs.append('text_max_len')
+
+		if self.text_min_len != other.text_min_len:
+			diffs.append('text_min_len')
+
+		if self.window_size != other.window_size:
+			diffs.append('window_size')
+
+		return diffs
 
 def main():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect((HOST,PORT))
+	client = sock.socket(sock.AF_INET,sock.SOCK_STREAM)
+	client.connect((HOST,PORT))
 
-    protocol = 'GBN'
-    text_max = 30
-    window = 5
+	config = config_t()
 
-    requisition = f'CFG:{protocol},{text_max},{window}\n'
+	client.send(config.to_bytes())
+	print(f'Requisição de configuração enviada: {config}')
 
-    client.send(requisition.encode())
-    print(f'Requisição de configuração enviada: {requisition}')
+	recv_config = config_t.recv(client)
+	diffs = config.diff(recv_config)
+	print('O servidor discorda com:\n')
+	for diff in diffs:
+		print(f'\t{diff}\n')
+	config = recv_config
 
-    recv_protocol, recv_text_max, recv_window = recvConfiguration(client)
-    if recv_protocol != protocol:
-        print(f'servidor discorda do protocol: {recv_protocol}')
-        protocol = recv_protocol
-    if text_max != recv_text_max:
-        print(f'servidor discorda do tamanho do texto: {recv_text_max}')
-        text_max = recv_text_max
-    if window != recv_window:
-        print(f'servidor discorda do tamanho da janela: {recv_window}')
-        recv_window = window
+	print(f'Configuração:\n\tModo de operação:{config.shipping} / {config.algorithm},\n\tTamanho maximo inicial do texto:{config.text_max_len},\n\tTamanho da janela:{config.window_size}')
 
-    print(f'Configuração:\n\tModo de operação:{protocol},\n\tTamanho do texto inicial:{text_max},\n\tTamanho da janela:{window}')
-
-    client.close()
+	client.close()
 
 if __name__ == '__main__':
     try:
