@@ -1,4 +1,5 @@
 from enum import Enum
+from os.path import isjunction
 import socket as sock
 from dataclasses import dataclass
 from random import randint
@@ -28,12 +29,24 @@ class shipping_t(Enum):
 	def __str__(self) -> str:
 		return self.name
 
+	@classmethod
+	def _missing_(cls, value: object):
+		if isinstance(value, str) and value.isdigit():
+			return cls(int(value))
+		return super()._missing_(value)
+
 class algorithm_t(Enum):
 	GBN = 0
 	SR = 1
 
 	def __str__(self) -> str:
 		return self.name
+
+	@classmethod
+	def _missing_(cls, value: object):
+		if isinstance(value, str) and value.isdigit():
+			return cls(int(value))
+		return super()._missing_(value)
 
 @dataclass
 class config_t:
@@ -60,7 +73,7 @@ class config_t:
 			return config_t()
 
 		pieces = data[4:].split(',')
-		return config_t(shipping_t(int(pieces[0])),algorithm_t(int(pieces[1])),int(pieces[2]),int(pieces[3]),int(pieces[4]))
+		return config_t(shipping_t(pieces[0]),algorithm_t(pieces[1]),int(pieces[2]),int(pieces[3]),int(pieces[4]))
 
 	@classmethod
 	def recv(cls,socket: sock.socket) -> config_t:
@@ -109,4 +122,4 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print('Fechando servidor...')
+        print('\nFechando servidor...')

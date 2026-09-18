@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ast import Continue
 from enum import Enum
 import socket as sock
 from dataclasses import dataclass
@@ -27,12 +28,24 @@ class shipping_t(Enum):
 	def __str__(self) -> str:
 		return self.name
 
+	@classmethod
+	def _missing_(cls, value: object):
+		if isinstance(value,str) and value.isdigit():
+			return cls(int(value))
+		return super()._missing_(value)
+
 class algorithm_t(Enum):
 	GBN = 0
 	SR = 1
 
 	def __str__(self) -> str:
 		return self.name
+
+	@classmethod
+	def _missing_(cls, value: object):
+		if isinstance(value,str) and value.isdigit():
+			return cls(int(value))
+		return super()._missing_(value)
 
 @dataclass
 class config_t:
@@ -95,17 +108,34 @@ def main():
 	client = sock.socket(sock.AF_INET,sock.SOCK_STREAM)
 	client.connect((HOST,PORT))
 
-	config = config_t()
+	shipping = 0
+	while True:
+		try:
+			shipping = shipping_t(input("Digite 0 para envio individual e 1 para envio em lote: "))
+			break
+		except ValueError:
+			continue
+
+	algorithm = 0
+	while True:
+		try:
+			algorithm = algorithm_t(input("Digite 0 para Go-Back-N e 1 para repetição seletiva: "))
+			break
+		except ValueError:
+			continue
+
+	config = config_t(shipping,algorithm)
 
 	client.send(config.to_bytes())
 	print(f'Requisição de configuração enviada: {config}')
 
 	recv_config = config_t.recv(client)
 	diffs = config.diff(recv_config)
-	print('O servidor discorda com:\n')
-	for diff in diffs:
-		print(f'\t{diff}\n')
-	config = recv_config
+	if diffs:
+		print('O servidor discorda com:\n')
+		for diff in diffs:
+			print(f'\t{diff}\n')
+		config = recv_config
 
 	print(f'Configuração:\n\tModo de operação:{config.shipping} / {config.algorithm},\n\tTamanho maximo inicial do texto:{config.text_max_len},\n\tTamanho da janela:{config.window_size}')
 
