@@ -1,13 +1,12 @@
-from __future__ import annotations
-from ast import Continue
+from __future__ import annotations, print_function
+from contextlib import contextmanager
 from enum import Enum
+from math import exp
+import struct
 import socket as sock
 from dataclasses import dataclass
 from random import randint
-
-## TODO: Poder escolher o envio em lote ou individual  
-## TODO: Cliente escolher entre go back end e sr/
-## TODO: Ajeitar o tamanho da janela entre 1 e 5
+from typing import Protocol
 
 HOST = '127.0.0.1'
 PORT = 8080
@@ -49,18 +48,11 @@ class algorithm_t(Enum):
 
 @dataclass
 class config_t:
-	shipping: shipping_t
-	algorithm: algorithm_t
-	text_max_len: int
-	text_min_len: int
-	window_size: int
-
-	def __init__(self,shipping: shipping_t = shipping_t.BATCH, algorithm: algorithm_t = algorithm_t.GBN, text_max_len:int = 30, text_min_len:int = 30,window_size:int = randint(0,5)) -> None:
-		self.shipping = shipping
-		self.algorithm = algorithm
-		self.text_max_len = text_max_len
-		self.text_min_len = text_min_len
-		self.window_size = window_size
+	shipping: shipping_t = shipping_t.BATCH
+	algorithm: algorithm_t = algorithm_t.GBN
+	text_max_len: int = 30
+	text_min_len: int = 30
+	window_size: int = 0
 
 	def __str__(self) -> str:
 		return f'CFG:{self.shipping.value},{self.algorithm.value},{self.text_max_len},{self.text_min_len},{self.window_size}\n'
@@ -99,16 +91,211 @@ class config_t:
 		if self.text_min_len != other.text_min_len:
 			diffs.append('text_min_len')
 
-		if self.window_size != other.window_size:
+		if self.window_size is not None and self.window_size != other.window_size:
 			diffs.append('window_size')
 
 		return diffs
+@dataclass()
+class packet_t:
+	seq: int
+	is_ack: bool = False
+	flush: bool = False
+	data: bytes = b''
+
+	HEADER_FORMAT = '!HBB'
+	HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+	def to_bytes(self) -> bytes:
+		flags = 0
+		if self.is_ack: flags |= 0x01
+		if self.flush: flags |= 0x02
+
+		header = struct.pack(self.HEADER_FORMAT, self.seq,flags,len(self.data))
+		return header + self.data
+
+	@classmethod
+	def from_bytes(cls,data:bytes):
+		seq, flags, size = struct.unpack_from(cls.HEADER_FORMAT, data)
+
+		is_ack = bool(flags & 0x01)
+		flush = bool(flags & 0x02)
+
+		return cls(seq,is_ack,flush,data[cls.HEADER_SIZE:])
+
+	@classmethod
+	def recv(cls,socket: sock.socket) -> packet_t:
+		header = b''
+		while len(header) < cls.HEADER_SIZE:
+			chunk = socket.recv(cls.HEADER_SIZE - len(header))
+			if not chunk: raise RuntimeError("Conexão fechada")
+			header += chunk
+
+		_,_,size = struct.unpack_from(cls.HEADER_FORMAT, header)
+
+		payload = b''
+		while len(payload) < size:
+			chunk = socket.recv(size - len(payload))
+			if not chunk: raise RuntimeError("Conexão fechada")
+			payload += chunk
+
+		return cls.from_bytes(header + payload)
+
+class ProtocolHandler:
+	socket: sock.socket
+	config: config_t
+
+	def __init__(self,socket: sock.socket, config: config_t) -> None:
+		self.socket = socket
+		self.config = config
+
+	def transmit(self,packets: list[packet_t]) -> None:
+		raise NotImplementedError
+
+	def recv(self) -> list[packet_t]:
+		raise NotImplemented
+
+	def _wait_for_ack(self,seq:int):
+		while True:
+			packet = packet_t.recv(self.socket)
+			if(packet.is_ack and packet.seq == seq): return
+
+	def _wait_for_batch_acks(self,seq: int) -> int:
+		while True:
+			packet = packet_t.recv(self.socket)
+			if packet.is_ack and packet.seq == seq:
+				return seq + 1
+
+class GoBackN(ProtocolHandler):
+	def transmit(self, packets: list[packet_t]) -> None:
+		if self.config.shipping == shipping_t.INDIVIDUAL:
+			for packet in packets:
+				self.socket.send(packet.to_bytes())
+				self._wait_for_ack(packet.seq)
+
+		elif self.config.shipping == shipping_t.BATCH:
+			window = 0
+			while window < len(packets):
+				limit = min(window + self.config.window_size, len(packets))
+
+				for i in range(window,limit):
+					self.socket.send(packets[i].to_bytes())
+
+				last_seq_sent = packets[limit - 1].seq
+				window = self._wait_for_batch_acks(last_seq_sent)
+
+	def recv(self) -> list[packet_t]:
+		packets = []
+		expected_seq = 0
+		while True:
+			packet = packet_t.recv(self.socket)
+
+			if packet.seq == expected_seq:
+				packets.append(packet)
+				
+				ack_packet = packet_t(seq=expected_seq, is_ack=True)
+				self.socket.send(ack_packet.to_bytes())
+				expected_seq += 1
+
+				if packet.flush:
+					break
+		return packets
+
+class SelectiveRepeat(ProtocolHandler):
+	def transmit(self, packets: list[packet_t]) -> None:
+		if self.config.shipping == shipping_t.INDIVIDUAL:
+			for packet in packets:
+				self.socket.send(packet.to_bytes())
+				self._wait_for_ack(packet.seq)
+
+		elif self.config.shipping == shipping_t.BATCH:
+			window = 0
+			next_seq_to_send = 0
+			acked_packets = set()
+			
+			while window < len(packets):
+				limit = min(window + self.config.window_size,len(packets))
+				while next_seq_to_send < limit:
+					self.socket.send(packets[next_seq_to_send].to_bytes())
+					next_seq_to_send += 1
+
+				while window < len(packets) and window not in acked_packets:
+					ack_packet = packet_t.recv(self.socket)
+
+					if ack_packet.is_ack:
+						acked_packets.add(ack_packet.seq)
+
+					while window in acked_packets:
+						window += 1
+
+	def recv(self) -> list[packet_t]:
+		packets = []
+		while True:
+			packet = packet_t.recv(self.socket)
+			ack_packet = packet_t(seq=packet.seq,is_ack=True)
+			self.socket.send(ack_packet.to_bytes())
+
+			packets.append(packet)
+
+			if packet.flush:
+				break
+		return packets
+
+class message_t:
+	packets: list[packet_t]
+
+	def __init__(self,data:bytes = b'') -> None:
+		if not data: return
+		self.packets: list[packet_t] = []
+
+		seq = 0
+		while len(data) > 4:
+			self.packets.append(packet_t(seq,data=data[:4]))
+			seq += 1
+			data = data[4:]
+		self.packets.append(packet_t(seq,flush=True,data=data[:4]))
+		seq += 1
+
+	def send(self,socket: sock.socket,config: config_t) -> None:
+		ALGORITHM_DISPATCHER = {
+			algorithm_t.GBN: GoBackN,
+			algorithm_t.SR: SelectiveRepeat
+		} 
+
+		handler_class = ALGORITHM_DISPATCHER[config.algorithm]
+		protocol = handler_class(socket=socket, config=config)
+
+		protocol.transmit(self.packets)
+
+	def __len__(self):
+		return sum(len(packet.data) for packet in self.packets)
+
+	@classmethod
+	def recv(cls,socket:sock.socket,config: config_t) -> message_t:
+		ALGORITHM_DISPATCHER = {
+			algorithm_t.GBN: GoBackN,
+			algorithm_t.SR: SelectiveRepeat
+		} 
+
+		handler_class = ALGORITHM_DISPATCHER[config.algorithm]
+		protocol = handler_class(socket=socket, config=config)
+
+		packets = protocol.recv()
+		message = cls()
+		message.packets = packets
+
+		return message
+
+	def __str__(self) -> str:
+		data = b''
+		for packet in self.packets:
+			data += packet.data
+		return data.decode().strip()
 
 def main():
 	client = sock.socket(sock.AF_INET,sock.SOCK_STREAM)
 	client.connect((HOST,PORT))
 
-	shipping = 0
+	shipping = shipping_t.BATCH
 	while True:
 		try:
 			shipping = shipping_t(input("Digite 0 para envio individual e 1 para envio em lote: "))
@@ -116,20 +303,40 @@ def main():
 		except ValueError:
 			continue
 
-	algorithm = 0
+	algorithm = algorithm_t.GBN
 	while True:
 		try:
-			algorithm = algorithm_t(input("Digite 0 para Go-Back-N e 1 para repetição seletiva: "))
+			algorithm = algorithm_t(input("Digite 0 para Go-Back-N e 1 para Repetição seletiva: "))
 			break
 		except ValueError:
 			continue
 
-	config = config_t(shipping,algorithm)
+	text_max_len = 30
+	while True:
+		try:
+			number = input("Digite um numero para o tamanho maximo do texto ou aperte enter:")
+			text_max_len = 30 if not number else int(number)
+			break
+		except ValueError:
+			continue
+
+	text_min_len = 30
+	while True:
+		try:
+			number = input("Digite um numero para o tamanho minimo do texto ou aperte enter:")
+			text_min_len = 30 if not number else int(number)
+			break
+		except ValueError:
+			continue
+
+	config = config_t(shipping,algorithm,text_max_len,text_min_len)
 
 	client.send(config.to_bytes())
 	print(f'Requisição de configuração enviada: {config}')
 
 	recv_config = config_t.recv(client)
+	config.window_size = recv_config.window_size
+
 	diffs = config.diff(recv_config)
 	if diffs:
 		print('O servidor discorda com:\n')
@@ -137,12 +344,20 @@ def main():
 			print(f'\t{diff}\n')
 		config = recv_config
 
-	print(f'Configuração:\n\tModo de operação:{config.shipping} / {config.algorithm},\n\tTamanho maximo inicial do texto:{config.text_max_len},\n\tTamanho da janela:{config.window_size}')
+	print(f'Configuração:\n\tModo de operação: {config.shipping} / {config.algorithm}\n\tTamanho maximo inicial do texto:{config.text_max_len}\n\tTamanho da janela:{config.window_size}')
 
-	client.close()
+	try:
+		while True:
+			message = message_t(input("Digite a mensagem a ser enviada: ").encode())
+			if(len(message) < config.text_min_len):
+				print(f'A mensagem deve ter {config.text_min_len} ou mais caracteres')
+				continue
+			if len(message) > config.text_max_len:
+				print(f'A mensagem deve ter no maximo {config.text_max_len} caracteres')
+				continue
+			message.send(client,config)
+	except KeyboardInterrupt:
+		client.close()
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print('Encerrando programa')
+	main()
