@@ -173,15 +173,14 @@ class GoBackN(ProtocolHandler):
 				self._wait_for_ack(packet.seq)
 
 		elif self.config.shipping == shipping_t.BATCH:
-			window = 0
-			while window < len(packets):
-				limit = min(window + self.config.window_size, len(packets))
-
-				for i in range(window,limit):
+			sent_count = 0
+			while sent_count < len(packets):
+				limit = min(self.config.window_size,len(packets) - sent_count) + sent_count
+				for i in range(sent_count,limit):
 					self.socket.send(packets[i].to_bytes())
 
-				last_seq_sent = packets[limit - 1].seq
-				window = self._wait_for_batch_acks(last_seq_sent)
+				self._wait_for_ack(packets[limit-1].seq)
+				sent_count = limit
 
 	def recv(self) -> list[packet_t]:
 		packets = []
@@ -208,24 +207,16 @@ class SelectiveRepeat(ProtocolHandler):
 				self._wait_for_ack(packet.seq)
 
 		elif self.config.shipping == shipping_t.BATCH:
-			window = 0
-			next_seq_to_send = 0
-			acked_packets = set()
-			
-			while window < len(packets):
-				limit = min(window + self.config.window_size,len(packets))
-				while next_seq_to_send < limit:
-					self.socket.send(packets[next_seq_to_send].to_bytes())
-					next_seq_to_send += 1
+			sent_count = 0
+			while sent_count < len(packets):
+				limit = min(self.config.window_size,len(packets) - sent_count) + sent_count
+				for i in range(sent_count,limit):
+					self.socket.send(packets[i].to_bytes())
 
-				while window < len(packets) and window not in acked_packets:
-					ack_packet = packet_t.recv(self.socket)
+				for i in range(sent_count,limit):
+					self._wait_for_ack(packets[i].seq)
 
-					if ack_packet.is_ack:
-						acked_packets.add(ack_packet.seq)
-
-					while window in acked_packets:
-						window += 1
+				sent_count = limit
 
 	def recv(self) -> list[packet_t]:
 		packets = []
