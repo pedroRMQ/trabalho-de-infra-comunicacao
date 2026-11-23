@@ -1,285 +1,92 @@
-from __future__ import annotations, print_function
-from contextlib import contextmanager
-from enum import Enum
-from math import exp
-import struct
+import enum
 import socket as sock
-from dataclasses import dataclass
-from random import randint
-from typing import Protocol
+import copy
+
+from core import *
 
 HOST = '127.0.0.1'
 PORT = 8080
 
-def recv(socket: sock.socket) -> bytes:
-    buffer = b''
-    while True:
-        data = socket.recv(1)
-        if not data or data == b'\n':
-            break
-        buffer += data
-    return buffer
+class failure_type_t(Enum):
+	CORRUPTION = 0
+	DROP = 1
+	REORDER = 2
+	DUPLICATE = 3
 
-class shipping_t(Enum):
-	INDIVIDUAL = 0
-	BATCH = 1
+class failure_t:
+	message: message_t;
 
-	def __str__(self) -> str:
-		return self.name
+	def __init__(self,message: message_t) -> None:
+		self.original = message
+		self.message = copy.deepcopy(message)
 
-	@classmethod
-	def _missing_(cls, value: object):
-		if isinstance(value,str) and value.isdigit():
-			return cls(int(value))
-		return super()._missing_(value)
+	def add(self, type: failure_type_t) -> "failure_t":
+		match type:
+			case failure_type_t.CORRUPTION:
+				self._apply_corruption()
+			case failure_type_t.DROP:
+				self._apply_drop()
+			case failure_type_t.REORDER:
+				self._apply_reorder()
+			case failure_type_t.DUPLICATE:
+				self._apply_duplicate()
+			case _:
+				raise ValueError(f"Tipo de falha não suportado: {type}")
+		return self
 
-class algorithm_t(Enum):
-	GBN = 0
-	SR = 1
+	def _select_packet_index(self, action: str) -> int | None:
+		packets = self.message.packets
+		if not packets:
+			print(f"\tNão há pacotes disponiveis para {action}.")
+			return None
 
-	def __str__(self) -> str:
-		return self.name
+		print("\n\tPacotes Disponiveis")
+		for i, packet in enumerate(packets):
+			print(f"\t\t[{i}] {packet}")
 
-	@classmethod
-	def _missing_(cls, value: object):
-		if isinstance(value,str) and value.isdigit():
-			return cls(int(value))
-		return super()._missing_(value)
-
-@dataclass
-class config_t:
-	shipping: shipping_t = shipping_t.BATCH
-	algorithm: algorithm_t = algorithm_t.GBN
-	text_max_len: int = 30
-	text_min_len: int = 30
-	window_size: int = 0
-
-	def __str__(self) -> str:
-		return f'CFG:{self.shipping.value},{self.algorithm.value},{self.text_max_len},{self.text_min_len},{self.window_size}\n'
-
-	@classmethod
-	def from_bytes(cls,conf: bytes):
-		data = conf if not conf else conf.strip().decode()
-		if not data or not data.startswith('CFG:'):
-			return config_t()
-
-		pieces = data[4:].split(',')
-		return config_t(shipping_t(int(pieces[0])),algorithm_t(int(pieces[1])),int(pieces[2]),int(pieces[3]),int(pieces[4]))
-
-	@classmethod
-	def recv(cls,socket: sock.socket) -> config_t:
-		conf = recv(socket)
-		return cls.from_bytes(conf)
-
-	def to_bytes(self) -> bytes:
-		return str(self).encode()
-
-	def diff(self,other: object) -> list[str]:
-		if not isinstance(other,config_t):
-			raise TypeError("Só é possivel diferenciar dois config_t")
-
-		diffs = []
-		if self.shipping != other.shipping:
-			diffs.append('shipping')
-
-		if self.algorithm != other.algorithm:
-			diffs.append('algorithm')
-
-		if self.text_max_len != other.text_max_len:
-			diffs.append('text_max_len')
-
-		if self.text_min_len != other.text_min_len:
-			diffs.append('text_min_len')
-
-		if self.window_size is not None and self.window_size != other.window_size:
-			diffs.append('window_size')
-
-		return diffs
-@dataclass()
-class packet_t:
-	seq: int
-	is_ack: bool = False
-	flush: bool = False
-	data: bytes = b''
-
-	HEADER_FORMAT = '!HBB'
-	HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-
-	def to_bytes(self) -> bytes:
-		flags = 0
-		if self.is_ack: flags |= 0x01
-		if self.flush: flags |= 0x02
-
-		header = struct.pack(self.HEADER_FORMAT, self.seq,flags,len(self.data))
-		return header + self.data
-
-	@classmethod
-	def from_bytes(cls,data:bytes):
-		seq, flags, size = struct.unpack_from(cls.HEADER_FORMAT, data)
-
-		is_ack = bool(flags & 0x01)
-		flush = bool(flags & 0x02)
-
-		return cls(seq,is_ack,flush,data[cls.HEADER_SIZE:])
-
-	@classmethod
-	def recv(cls,socket: sock.socket) -> packet_t:
-		header = b''
-		while len(header) < cls.HEADER_SIZE:
-			chunk = socket.recv(cls.HEADER_SIZE - len(header))
-			if not chunk: raise RuntimeError("Conexão fechada")
-			header += chunk
-
-		_,_,size = struct.unpack_from(cls.HEADER_FORMAT, header)
-
-		payload = b''
-		while len(payload) < size:
-			chunk = socket.recv(size - len(payload))
-			if not chunk: raise RuntimeError("Conexão fechada")
-			payload += chunk
-
-		return cls.from_bytes(header + payload)
-
-class ProtocolHandler:
-	socket: sock.socket
-	config: config_t
-
-	def __init__(self,socket: sock.socket, config: config_t) -> None:
-		self.socket = socket
-		self.config = config
-
-	def transmit(self,packets: list[packet_t]) -> None:
-		raise NotImplementedError
-
-	def recv(self) -> list[packet_t]:
-		raise NotImplemented
-
-	def _wait_for_ack(self,seq:int):
 		while True:
-			packet = packet_t.recv(self.socket)
-			if(packet.is_ack and packet.seq == seq): return
+			value = input(f"Qual pacote {action}? ").strip()
+			if value.isdigit() and int(value) >= 0 and len(packets) > int(value):
+				return int(value)
+			print("Indice invalido")
 
-	def _wait_for_batch_acks(self,seq: int) -> int:
-		while True:
-			packet = packet_t.recv(self.socket)
-			if packet.is_ack and packet.seq == seq:
-				return seq + 1
+	def _apply_corruption(self):
+		i = self._select_packet_index("corromper")
+		if i is not None:
+			self.message.packets[i] = self._corrupt_packet(self.message.packets[i])
+			print(f"-> Pacote [{i}] corrompido!")
 
-class GoBackN(ProtocolHandler):
-	def transmit(self, packets: list[packet_t]) -> None:
-		if self.config.shipping == shipping_t.INDIVIDUAL:
-			for packet in packets:
-				self.socket.send(packet.to_bytes())
-				self._wait_for_ack(packet.seq)
+	def _corrupt_packet(self,packet: packet_t) -> packet_t:
+		packet.data = random.randbytes(len(packet.data))
+		return packet
 
-		elif self.config.shipping == shipping_t.BATCH:
-			sent_count = 0
-			while sent_count < len(packets):
-				limit = min(self.config.window_size,len(packets) - sent_count) + sent_count
-				for i in range(sent_count,limit):
-					self.socket.send(packets[i].to_bytes())
+	def _apply_drop(self):
+		i = self._select_packet_index("derrubar")
+		if i is not None:
+			self.message.packets.pop(i)
+			print(f"-> Pacote [{i}] derrubado!")
 
-				self._wait_for_ack(packets[limit-1].seq)
-				sent_count = limit
+	def _apply_duplicate(self) -> None:
+		i = self._select_packet_index("duplicar")
+		if i is not None:
+			packets = self.message.packets
+			duplicate = copy.deepcopy(packets[i])
+			if packets[i].flush:
+				packets[i].flush = False
+			packets.insert(i + 1, duplicate)
+			print(f"-> Pacote [{i}] duplicado!")
 
-	def recv(self) -> list[packet_t]:
-		packets = []
-		expected_seq = 0
-		while True:
-			packet = packet_t.recv(self.socket)
+	def _apply_reorder(self) -> None:
+		packets = self.message.packets
+		if len(packets) < 2:
+			print("\tPacotes insuficientes para reordenar.")
+			return
 
-			if packet.seq == expected_seq:
-				packets.append(packet)
-				
-				ack_packet = packet_t(seq=expected_seq, is_ack=True)
-				self.socket.send(ack_packet.to_bytes())
-				expected_seq += 1
-
-				if packet.flush:
-					break
-		return packets
-
-class SelectiveRepeat(ProtocolHandler):
-	def transmit(self, packets: list[packet_t]) -> None:
-		if self.config.shipping == shipping_t.INDIVIDUAL:
-			for packet in packets:
-				self.socket.send(packet.to_bytes())
-				self._wait_for_ack(packet.seq)
-
-		elif self.config.shipping == shipping_t.BATCH:
-			sent_count = 0
-			while sent_count < len(packets):
-				limit = min(self.config.window_size,len(packets) - sent_count) + sent_count
-				for i in range(sent_count,limit):
-					self.socket.send(packets[i].to_bytes())
-
-				for i in range(sent_count,limit):
-					self._wait_for_ack(packets[i].seq)
-
-				sent_count = limit
-
-	def recv(self) -> list[packet_t]:
-		packets = []
-		while True:
-			packet = packet_t.recv(self.socket)
-			ack_packet = packet_t(seq=packet.seq,is_ack=True)
-			self.socket.send(ack_packet.to_bytes())
-
-			packets.append(packet)
-
-			if packet.flush:
-				break
-		return packets
-
-class message_t:
-	packets: list[packet_t]
-
-	def __init__(self,data:bytes = b'') -> None:
-		if not data: return
-		self.packets: list[packet_t] = []
-
-		seq = 0
-		while len(data) > 4:
-			self.packets.append(packet_t(seq,data=data[:4]))
-			seq += 1
-			data = data[4:]
-		self.packets.append(packet_t(seq,flush=True,data=data[:4]))
-
-	def send(self,socket: sock.socket,config: config_t) -> None:
-		ALGORITHM_DISPATCHER = {
-			algorithm_t.GBN: GoBackN,
-			algorithm_t.SR: SelectiveRepeat
-		} 
-
-		handler_class = ALGORITHM_DISPATCHER[config.algorithm]
-		protocol = handler_class(socket=socket, config=config)
-
-		protocol.transmit(self.packets)
-
-	def __len__(self):
-		return sum(len(packet.data) for packet in self.packets)
-
-	@classmethod
-	def recv(cls,socket:sock.socket,config: config_t) -> message_t:
-		ALGORITHM_DISPATCHER = {
-			algorithm_t.GBN: GoBackN,
-			algorithm_t.SR: SelectiveRepeat
-		} 
-
-		handler_class = ALGORITHM_DISPATCHER[config.algorithm]
-		protocol = handler_class(socket=socket, config=config)
-
-		packets = protocol.recv()
-		message = cls()
-		message.packets = packets
-
-		return message
-
-	def __str__(self) -> str:
-		data = b''
-		for packet in self.packets:
-			data += packet.data
-		return data.decode().strip()
+		random.shuffle(packets)
+		print("-> Pacotes reordenados!")
+	
+	def build(self):
+		return self.message
 
 def main():
 	client = sock.socket(sock.AF_INET,sock.SOCK_STREAM)
@@ -293,10 +100,10 @@ def main():
 		except ValueError:
 			continue
 
-	algorithm = algorithm_t.GBN
+	protocol = protocol_t.GO_BACK_N
 	while True:
 		try:
-			algorithm = algorithm_t(input("Digite 0 para Go-Back-N e 1 para Repetição seletiva: "))
+			protocol = protocol_t(input("Digite 0 para Go-Back-N e 1 para Repetição seletiva: "))
 			break
 		except ValueError:
 			continue
@@ -319,35 +126,64 @@ def main():
 		except ValueError:
 			continue
 
-	config = config_t(shipping,algorithm,text_max_len,text_min_len)
+	config = config_t(protocol,shipping,text_max_len,text_min_len)
 
 	client.send(config.to_bytes())
 	print(f'Requisição de configuração enviada: {config}')
 
 	recv_config = config_t.recv(client)
-	config.window_size = recv_config.window_size
 
-	diffs = config.diff(recv_config)
-	if diffs:
-		print('O servidor discorda com:\n')
-		for diff in diffs:
-			print(f'\t{diff}\n')
-		config = recv_config
+	config.window = recv_config.window
+	print(
+		f'\tConfiguração:'
+		f'\n\t\tModo de operação: {config.algorithm}'
+		f'\n\t\tTamanho maximo do texto: {config.text_max_len}'
+		f'\n\t\tTamanho da janela: {config.window}'
+		f'\n\t\tNumero de sequencia: {config.seq}'
+	)
 
-	print(f'Configuração:\n\tModo de operação: {config.shipping} / {config.algorithm}\n\tTamanho maximo inicial do texto:{config.text_max_len}\n\tTamanho da janela:{config.window_size}')
+	while True:
+		message = message_t(input("Digite a mensagem a ser enviada: ").encode(),config.seq)
+		if(len(message) < config.text_min_len):
+			print(f'A mensagem deve ter {config.text_min_len} ou mais caracteres')
+			continue
+		if len(message) > config.text_max_len:
+			print(f'A mensagem deve ter no maximo {config.text_max_len} caracteres')
+			continue
 
-	try:
-		while True:
-			message = message_t(input("Digite a mensagem a ser enviada: ").encode())
-			if(len(message) < config.text_min_len):
-				print(f'A mensagem deve ter {config.text_min_len} ou mais caracteres')
-				continue
-			if len(message) > config.text_max_len:
-				print(f'A mensagem deve ter no maximo {config.text_max_len} caracteres')
-				continue
-			message.send(client,config)
-	except KeyboardInterrupt:
-		client.close()
+		message_f = None
+		if(input("Inserir erros? [S/N]: ").strip().lower() == "s"):
+			failure = failure_t(message)
+			while True:
+				print("Selecione o tipo de erro:")
+				for tpe in failure_type_t:
+					print(f"\t[{tpe.value}] {tpe.name}")
+
+				option = input("Opção: ").strip()
+				if not option:
+					print("Edição de erros concluida")
+					message_f = failure.build()
+					break
+
+				try:
+					selected = failure_type_t(int(option)) if option.isdigit() else failure_type_t(option)
+					failure.add(selected)
+				except ValueError:
+					print("Opção inválida! Tente novamente.")
+
+		if message_f:
+			try:
+				print("Enviando mensagem com erros")
+				message_f.send(client,config.algorithm)
+				config.seq += message.packets_cnt()
+			except KeyboardInterrupt:
+				print("\n[!] Envio com erros abortado!")
+				print("Enviando mensagem original")
+				message.send(client,config.algorithm)
+				config.seq += message.packets_cnt()
+		else:
+			message.send(client,config.algorithm)
+			config.seq += message.packets_cnt()
 
 if __name__ == '__main__':
 	main()
