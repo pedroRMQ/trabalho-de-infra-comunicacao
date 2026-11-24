@@ -63,6 +63,9 @@ class failure_t:
 	def _apply_drop(self):
 		i = self._select_packet_index("derrubar")
 		if i is not None:
+			if self.message.packets[i].flush:
+				if i > 0:
+					self.message.packets[i-1].flush = True
 			self.message.packets.pop(i)
 			print(f"-> Pacote [{i}] derrubado!")
 
