@@ -29,8 +29,8 @@ class protocol_t(Enum):
 		return super()._missing_(value)
 
 class shipping_t(Enum):
-	BATCH = 0
-	INDIVIDUAL = 1
+	INDIVIDUAL = 0
+	BATCH = 1
 
 	def __str__(self) -> str:
 		return self.name.lower()
@@ -70,15 +70,15 @@ class protocol_handler_t:
 				continue
 
 			if packet.seq < seq:
-				print(f"Pacote duplicado {packet.seq} recebido, reenviando ack")
+				print(f"Pacote duplicado {packet} recebido, reenviando ack")
 				packet.send_ack(socket)
 				continue
 
 			if packet.seq > seq:
-				print(f"Pacote fora de ordem {packet.seq} descartado")
+				print(f"Pacote fora de ordem {packet} descartado")
 				continue
 
-			print(f"Pacote {packet.seq} recebido, enviando ack")
+			print(f"Pacote {packet} recebido, enviando ack")
 			packet.send_ack(socket)
 
 			buffer[packet.seq] = packet
@@ -96,10 +96,10 @@ class protocol_handler_t:
 				print(f"Enviando pacote de sequencia {packet.seq}")
 				try:
 					self.wait_for_ack(socket,packet.seq,timeout=0.2)
-					print(f"Pacote de confirmação para {packet.seq} recebido")
+					print(f"Pacote de confirmação para {packet} recebido")
 					break
 				except TimeoutError:
-					print(f"Timeout para pacote {packet.seq} atingido, reenviando pacote")
+					print(f"Timeout para pacote {packet} atingido, reenviando pacote")
 
 	def wait_for_ack(self,socket:sock.socket,seq:int|None = None,timeout:float|None = None) -> int:
 		while True:
@@ -130,10 +130,10 @@ class go_back_n_t(protocol_handler_t):
 				try:
 					ack = self.wait_for_ack(socket,timeout=0.2)
 					if ack >= packets[i].seq:
-						print(f"Pacote de confirmação para o pacote {ack} recebido")
+						print(f"Pacote de confirmação para o pacote {packets[i]} recebido")
 						i +=  ack - packets[i].seq + 1
 						continue
-					print(f"Pacote de confirmação para o pacote ja reconhecido {ack} recebido")
+					print(f"Pacote de confirmação para o pacote com sequencia {ack} ja reconhecido recebido")
 				except TimeoutError:
 					print(f"Timeout atingido, reenviando pacotes de sequencia {packets[i].seq} a {packets[limit-1].seq}")
 					for k in range(i,limit):
@@ -154,7 +154,7 @@ class selective_repeat_t(protocol_handler_t):
 					try:
 						ack = self.wait_for_ack(socket,timeout=0.2)
 						if ack == packets[i].seq:
-							print(f"Pacote de confirmação para {ack} recebido")
+							print(f"Pacote de confirmação para {packets[i]} recebido")
 							break
 						print(f"Pacote de confirmação para {ack} ignorado, esperando confirmação para {packets[i].seq}")
 					except TimeoutError:
